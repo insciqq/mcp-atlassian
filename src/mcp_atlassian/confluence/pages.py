@@ -840,6 +840,7 @@ class PagesMixin(ConfluenceClient):
         emoji: str | None = None,
         page_width: str | None = None,
         table_layout: str | None = None,
+        based_on_version: int | None = None,
     ) -> ConfluencePage:
         """
         Update an existing page in Confluence.
@@ -857,6 +858,10 @@ class PagesMixin(ConfluenceClient):
             emoji: Optional emoji character for the page title icon (keyword-only). Pass empty string to remove emoji.
             page_width: Optional page layout width ('full-width', 'max', or 'default', keyword-only). Pass empty string to reset to default.
             table_layout: Optional table width preset for markdown tables ('full-width', 'wide', 'default', keyword-only)
+            based_on_version: Version the new body was derived from (keyword-only).
+                When set, the write is submitted as exactly that version plus one,
+                so Confluence rejects it if the page changed in between instead of
+                overwriting the newer version.
 
         Returns:
             ConfluencePage model containing the updated page's data
@@ -887,12 +892,16 @@ class PagesMixin(ConfluenceClient):
                 logger.debug(
                     f"Using v2 API for OAuth authentication to update page '{page_id}'"
                 )
+                v2_kwargs: dict[str, Any] = {}
+                if based_on_version is not None:
+                    v2_kwargs["version_number"] = based_on_version + 1
                 response = v2_adapter.update_page(
                     page_id=page_id,
                     title=title,
                     body=final_body,
                     representation=representation,
                     version_comment=version_comment,
+                    **v2_kwargs,
                 )
             else:
                 logger.debug(
@@ -911,7 +920,35 @@ class PagesMixin(ConfluenceClient):
                 if parent_id:
                     update_kwargs["parent_id"] = parent_id
 
-                self.confluence.update_page(**update_kwargs)
+                if based_on_version is None:
+                    self.confluence.update_page(**update_kwargs)
+                else:
+                    # The SDK numbers the write from the latest version, which
+                    # would silently overwrite an edit published after our read.
+                    data: dict[str, Any] = {
+                        "id": page_id,
+                        "type": "page",
+                        "title": title,
+                        "version": {
+                            "number": based_on_version + 1,
+                            "minorEdit": is_minor_edit,
+                        },
+                        "body": {
+                            representation: {
+                                "value": final_body,
+                                "representation": representation,
+                            }
+                        },
+                    }
+                    if version_comment:
+                        data["version"]["message"] = version_comment
+                    if parent_id:
+                        data["ancestors"] = [{"type": "page", "id": parent_id}]
+                    self.confluence.put(
+                        f"rest/api/content/{page_id}",
+                        data=data,
+                        params={"status": "current"},
+                    )
 
             # Set or remove the page emoji if provided
             if emoji is not None:
@@ -993,6 +1030,7 @@ class PagesMixin(ConfluenceClient):
         # 1. Fetch raw storage XML — no markdown conversion so nothing is lost.
         page = self.get_page_content(page_id, convert_to_markdown=False)
         raw_storage = page.content or ""
+        read_version = page.version.number if page.version else None
 
         # 2. Convert new_content to storage format when necessary.
         if content_format == "markdown":
@@ -1073,6 +1111,7 @@ class PagesMixin(ConfluenceClient):
             content_representation="storage",
             is_minor_edit=is_minor_edit,
             version_comment=version_comment,
+            based_on_version=read_version,
         )
 
     def replace_page_content(
@@ -1146,6 +1185,7 @@ class PagesMixin(ConfluenceClient):
             content_representation="storage",
             is_minor_edit=is_minor_edit,
             version_comment=version_comment,
+            based_on_version=current_version,
         )
 
     def get_page_children(

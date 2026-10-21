@@ -1012,13 +1012,17 @@ async def update_page(
             "'markdown', 'wiki', 'storage', or 'xhtml'"
         )
 
+    based_on_version = None
     if content is None and not content_file:
-        # Rename or move only: write the stored body back unchanged.
+        # Rename or move only: write the stored body back unchanged, bound to
+        # the version read so an edit published in between is not reverted.
         current_page = confluence_fetcher.get_page_content(
             page_id, convert_to_markdown=False
         )
         resolved_content = current_page.content or ""
         content_format = "storage"
+        if current_page.version:
+            based_on_version = current_page.version.number
     else:
         resolved_content = _resolve_page_content(content, content_file)
 
@@ -1048,6 +1052,7 @@ async def update_page(
         emoji=emoji,
         page_width=page_width,
         table_layout=table_layout if content_format == "markdown" else None,
+        based_on_version=based_on_version,
     )
     page_data = updated_page.to_simplified_dict()
     if not include_content:

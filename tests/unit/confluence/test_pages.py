@@ -3957,6 +3957,7 @@ class TestReplacePageContent:
         assert kwargs["content_representation"] == "storage"
         assert kwargs["is_minor_edit"] is True
         assert kwargs["version_comment"] == "prepend"
+        assert kwargs["based_on_version"] == 7
 
     @pytest.mark.parametrize(("old_string", "count"), [("missing", 0), ("<p>", 3)])
     def test_requires_exactly_one_occurrence(self, pages_mixin, old_string, count):
@@ -4008,3 +4009,86 @@ class TestReplacePageContent:
                     page_id="123", old_string=old_string, new_string=new_string
                 )
         mock_get.assert_not_called()
+
+    def test_version_bound_update_puts_read_version_plus_one(self, pages_mixin):
+        """A bound write is numbered from the read version, not the latest one."""
+        with patch.object(
+            pages_mixin, "get_page_content", return_value=self._make_page("x")
+        ):
+            pages_mixin.update_page(
+                page_id="123",
+                title="My Page",
+                body="<p>new</p>",
+                is_markdown=False,
+                content_representation="storage",
+                is_minor_edit=True,
+                version_comment="c",
+                based_on_version=7,
+            )
+
+        pages_mixin.confluence.update_page.assert_not_called()
+        args, kwargs = pages_mixin.confluence.put.call_args
+        assert args[0] == "rest/api/content/123"
+        data = kwargs["data"]
+        assert data["version"] == {"number": 8, "minorEdit": True, "message": "c"}
+        assert data["body"] == {
+            "storage": {"value": "<p>new</p>", "representation": "storage"}
+        }
+        assert data["title"] == "My Page"
+        assert "metadata" not in data
+
+    def test_version_conflict_is_reported_not_overwritten(self, pages_mixin):
+        """A page published after the read makes the bound write fail."""
+        response = MagicMock(status_code=409)
+        pages_mixin.confluence.put.side_effect = HTTPError(
+            "409 Client Error: Conflict", response=response
+        )
+        with pytest.raises(Exception, match="409"):
+            pages_mixin.update_page(
+                page_id="123",
+                title="My Page",
+                body="<p>new</p>",
+                is_markdown=False,
+                content_representation="storage",
+                based_on_version=7,
+            )
+        pages_mixin.confluence.update_page.assert_not_called()
+
+    def test_version_bound_update_over_v2_passes_version_number(self, pages_mixin):
+        """The OAuth (v2) path submits the bound version too."""
+        adapter = MagicMock()
+        with (
+            patch.object(
+                type(pages_mixin),
+                "_v2_adapter",
+                new_callable=PropertyMock,
+                return_value=adapter,
+            ),
+            patch.object(
+                pages_mixin, "get_page_content", return_value=self._make_page("x")
+            ),
+        ):
+            pages_mixin.update_page(
+                page_id="123",
+                title="My Page",
+                body="<p>new</p>",
+                is_markdown=False,
+                content_representation="storage",
+                based_on_version=7,
+            )
+        assert adapter.update_page.call_args.kwargs["version_number"] == 8
+
+    def test_section_update_is_bound_to_read_version(self, pages_mixin):
+        """update_page_section writes on top of the version it read."""
+        page = self._make_page("<h2>S</h2><p>old</p>", version=4)
+        with (
+            patch.object(pages_mixin, "get_page_content", return_value=page),
+            patch.object(pages_mixin, "update_page") as mock_update,
+        ):
+            pages_mixin.update_page_section(
+                page_id="123",
+                heading_text="S",
+                new_content="<p>new</p>",
+                content_format="storage",
+            )
+        assert mock_update.call_args.kwargs["based_on_version"] == 4

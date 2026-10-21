@@ -1298,6 +1298,7 @@ async def test_update_page_without_content_keeps_current_body(
 ):
     """A rename without content writes the stored body back as storage."""
     mock_confluence_fetcher.get_page_content.return_value.content = "<p>raw</p>"
+    mock_confluence_fetcher.get_page_content.return_value.version = MagicMock(number=7)
     await client.call_tool(
         "confluence_update_page",
         {"page_id": "999999", "title": "Renamed Page"},
@@ -1311,6 +1312,21 @@ async def test_update_page_without_content_keeps_current_body(
     assert call_kwargs["body"] == "<p>raw</p>"
     assert call_kwargs["is_markdown"] is False
     assert call_kwargs["content_representation"] == "storage"
+    assert call_kwargs["based_on_version"] == 7
+
+
+@pytest.mark.anyio
+async def test_update_page_with_content_is_not_version_bound(
+    client, mock_confluence_fetcher
+):
+    """A full-body update keeps upstream numbering (latest version plus one)."""
+    await client.call_tool(
+        "confluence_update_page",
+        {"page_id": "999999", "title": "T", "content": "<p>new</p>"},
+    )
+
+    call_kwargs = mock_confluence_fetcher.update_page.call_args.kwargs
+    assert call_kwargs["based_on_version"] is None
 
 
 @pytest.mark.anyio
