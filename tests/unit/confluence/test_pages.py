@@ -3886,3 +3886,125 @@ class TestUpdatePageSection:
             )
 
         pages_mixin.preprocessor.markdown_to_confluence_storage.assert_not_called()
+
+
+class TestReplacePageContent:
+    """Tests for PagesMixin.replace_page_content."""
+
+    STORAGE = (
+        '<h1 style="text-align: left;"><strong>Title</strong></h1>'
+        '<p><ac:structured-macro ac:name="profile" ac:schema-version="1">'
+        '<ac:parameter ac:name="user"><ri:user ri:userkey="u1" /></ac:parameter>'
+        "</ac:structured-macro></p>"
+        '<p>Intro <ac:inline-comment-marker ac:ref="c1">marked'
+        "</ac:inline-comment-marker></p>"
+        '<p><ac:image ac:height="60"><ri:attachment ri:filename="a.png" />'
+        "</ac:image></p>"
+        "<table><tbody><tr><td>cell</td></tr></tbody></table>"
+    )
+
+    @pytest.fixture
+    def pages_mixin(self, confluence_client):
+        """Create a PagesMixin instance for testing."""
+        with patch(
+            "mcp_atlassian.confluence.pages.ConfluenceClient.__init__"
+        ) as mock_init:
+            mock_init.return_value = None
+            mixin = PagesMixin()
+            mixin.confluence = confluence_client.confluence
+            mixin.config = confluence_client.config
+            mixin.preprocessor = confluence_client.preprocessor
+            return mixin
+
+    def _make_page(self, storage_html: str, version: int = 7) -> ConfluencePage:
+        return ConfluencePage(
+            id="123",
+            title="My Page",
+            content=storage_html,
+            space={"key": "PROJ", "name": "Project"},
+            version={"number": version},
+        )
+
+    def test_inserts_before_first_heading_and_keeps_the_rest(self, pages_mixin):
+        """Only the matched fragment changes; the rest is written back verbatim."""
+        first = '<h1 style="text-align: left;"><strong>Title</strong></h1>'
+        updated = self._make_page("updated", version=8)
+        with (
+            patch.object(
+                pages_mixin,
+                "get_page_content",
+                return_value=self._make_page(self.STORAGE),
+            ) as mock_get,
+            patch.object(
+                pages_mixin, "update_page", return_value=updated
+            ) as mock_update,
+        ):
+            result = pages_mixin.replace_page_content(
+                page_id="123",
+                old_string=first,
+                new_string="<p>test text</p>" + first,
+                expected_version=7,
+                is_minor_edit=True,
+                version_comment="prepend",
+            )
+
+        assert result is updated
+        mock_get.assert_called_once_with("123", convert_to_markdown=False)
+        kwargs = mock_update.call_args.kwargs
+        assert kwargs["body"] == "<p>test text</p>" + self.STORAGE
+        assert kwargs["title"] == "My Page"
+        assert kwargs["is_markdown"] is False
+        assert kwargs["content_representation"] == "storage"
+        assert kwargs["is_minor_edit"] is True
+        assert kwargs["version_comment"] == "prepend"
+
+    @pytest.mark.parametrize(("old_string", "count"), [("missing", 0), ("<p>", 3)])
+    def test_requires_exactly_one_occurrence(self, pages_mixin, old_string, count):
+        """Zero or several matches are refused without writing."""
+        with (
+            patch.object(
+                pages_mixin,
+                "get_page_content",
+                return_value=self._make_page(self.STORAGE),
+            ),
+            patch.object(pages_mixin, "update_page") as mock_update,
+        ):
+            with pytest.raises(ValueError, match=f"occurs {count} times"):
+                pages_mixin.replace_page_content(
+                    page_id="123", old_string=old_string, new_string="x"
+                )
+        mock_update.assert_not_called()
+
+    def test_refuses_stale_expected_version(self, pages_mixin):
+        """An edit based on an older version is refused without writing."""
+        with (
+            patch.object(
+                pages_mixin,
+                "get_page_content",
+                return_value=self._make_page(self.STORAGE, version=9),
+            ),
+            patch.object(pages_mixin, "update_page") as mock_update,
+        ):
+            with pytest.raises(ValueError, match="at version 9, not 7"):
+                pages_mixin.replace_page_content(
+                    page_id="123",
+                    old_string="cell",
+                    new_string="new cell",
+                    expected_version=7,
+                )
+        mock_update.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("old_string", "new_string", "message"),
+        [("", "x", "must not be empty"), ("cell", "cell", "identical")],
+    )
+    def test_rejects_empty_or_noop_replacement(
+        self, pages_mixin, old_string, new_string, message
+    ):
+        """Empty or no-op replacements are refused before reading the page."""
+        with patch.object(pages_mixin, "get_page_content") as mock_get:
+            with pytest.raises(ValueError, match=message):
+                pages_mixin.replace_page_content(
+                    page_id="123", old_string=old_string, new_string=new_string
+                )
+        mock_get.assert_not_called()

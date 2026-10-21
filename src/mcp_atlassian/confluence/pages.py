@@ -1075,6 +1075,79 @@ class PagesMixin(ConfluenceClient):
             version_comment=version_comment,
         )
 
+    def replace_page_content(
+        self,
+        page_id: str,
+        old_string: str,
+        new_string: str,
+        *,
+        expected_version: int | None = None,
+        is_minor_edit: bool = False,
+        version_comment: str = "",
+    ) -> ConfluencePage:
+        """
+        Replace one exact fragment of a page's raw storage XHTML.
+
+        Fetches the page in raw storage format, requires ``old_string`` to occur
+        exactly once, replaces that occurrence and writes the storage back. The
+        rest of the page is written back byte for byte, so macros, mentions,
+        attachment images and inline comment markers elsewhere are untouched,
+        and the caller never resends the whole page.
+
+        Args:
+            page_id: The ID of the page to update.
+            old_string: Exact fragment of the current storage XHTML.
+            new_string: Storage XHTML that replaces the fragment.
+            expected_version: When set, refuse the edit unless the page is still
+                at this version. (keyword-only)
+            is_minor_edit: Whether to flag the page version as a minor edit.
+                (keyword-only)
+            version_comment: Optional version comment. (keyword-only)
+
+        Returns:
+            Updated ``ConfluencePage``.
+
+        Raises:
+            ValueError: If ``old_string`` is empty, equals ``new_string``, does
+                not occur exactly once, or the page moved past
+                ``expected_version``.
+            Exception: If retrieving or updating the page fails.
+        """
+        if not old_string:
+            raise ValueError("old_string must not be empty.")
+        if old_string == new_string:
+            raise ValueError("new_string is identical to old_string.")
+
+        page = self.get_page_content(page_id, convert_to_markdown=False)
+        current_version = page.version.number if page.version else None
+        if expected_version is not None and current_version != expected_version:
+            error_msg = (
+                f"Page {page_id} is at version {current_version}, not "
+                f"{expected_version}; read it again before editing."
+            )
+            raise ValueError(error_msg)
+
+        raw_storage = page.content or ""
+        occurrences = raw_storage.count(old_string)
+        if occurrences != 1:
+            error_msg = (
+                f"old_string occurs {occurrences} times in page {page_id}; it must "
+                "occur exactly once. Copy it from confluence_get_page with "
+                "convert_to_markdown=false and include enough surrounding markup "
+                "or text to make it unique."
+            )
+            raise ValueError(error_msg)
+
+        return self.update_page(
+            page_id=page_id,
+            title=page.title or "",
+            body=raw_storage.replace(old_string, new_string, 1),
+            is_markdown=False,
+            content_representation="storage",
+            is_minor_edit=is_minor_edit,
+            version_comment=version_comment,
+        )
+
     def get_page_children(
         self,
         page_id: str,
